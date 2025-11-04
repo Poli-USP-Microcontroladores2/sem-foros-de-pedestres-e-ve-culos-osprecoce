@@ -378,24 +378,8 @@ void main(void)
         }
     }
 
-    /* Ativa o modo noturno automaticamente ao iniciar */
-    set_night_mode(true); // conforme requisito: iniciar em modo noturno
-
-    printk("Semáforo iniciado diretamente em modo noturno!\n");
-
-    /* Exemplo: desativa o modo noturno depois de 5s para demonstrar transição automática (opcional) */
-    /* Comentário: remova ou altere conforme desejado; deixei para testes. */
-    k_msleep(5000);
-    set_night_mode(false);
-    printk("Transição para modo normal após 5s (exemplo). Ciclo começará em GREEN.\n");
     /* Garante que o ciclo inicie por green */
     k_sem_give(&sem_green);
-
-    /* Exemplo de trigger do pedestre por software após 10s (apenas demonstração) */
-    /* Remova ou comente em produção; em uso real, chame request_pedestrian_crossing() a partir de um ISR de botão. */
-    k_msleep(5000);
-    printk("Simulando pedido de pedestre (flag) em 10s do boot.\n");
-    request_pedestrian_crossing();
 
     /* main fica em loop para não encerrar */
     while (1) {
