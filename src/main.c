@@ -1,5 +1,5 @@
 /*
- * Semáforo de Pedestres com Ciclo Automático e Botão de Interrupção/Extensão
+ * Semáforo de Pedestres com Ciclo Automático e Botão de Interrupção
  * Placa: FRDM-KL25Z
  *
  * Mapeamento de Pinos:
@@ -17,7 +17,7 @@
  * - 2. Interrompe o restante do tempo e vai para o Verde.
  *
  * Botão (durante o Verde):
- * - Prolonga o verde por mais 4s (a partir do clique).
+ * - Ignorado. Não faz absolutamente nada.
  *
  * Modo Noturno:
  * - Verde: Desligado
@@ -44,7 +44,7 @@ static struct gpio_callback button_cb_data;
 
 
 /* 3. Semáforo para sinalizar o evento do botão */
-K_SEM_DEFINE(button_sem, 0, 1); // Inicia "vazio" (0), com limite de 1
+K_SEM_DEFINE(button_sem, 0, 1); // Inicia "vazio" (0, com limite de 1
 
 
 /* 4. Flag de Controle do Modo Noturno */
@@ -155,47 +155,36 @@ int main(void)
             }
             break;
 
+        // ***** INÍCIO DA ALTERAÇÃO *****
         case STATE_GREEN:
-            LOG_INF("Ciclo: VERDE (led0) ON por 4s (ou até botão)");
+            LOG_INF("Ciclo: VERDE (led0) ON por 4s");
             gpio_pin_set_dt(&led_red, 0);
             gpio_pin_set_dt(&led_green, 1);
             
-            // Limpa qualquer semáforo de botão pendente ANTES de esperar
-            k_sem_reset(&button_sem); 
+            // Dorme por 4s (Não pode ser interrompido pelo botão)
+            // A ISR do botão ainda vai disparar e dar k_sem_give(),
+            // mas esse semáforo será limpo no início do STATE_RED.
+            k_sleep(K_SECONDS(4)); 
+            
+            LOG_INF("Timeout de 4s (Verde). -> indo para led2 (Azul).");
 
-            // Espera pelo semáforo (botão) por no MÁXIMO 4 segundos
-            ret = k_sem_take(&button_sem, K_SECONDS(4));
-
-            if (ret == 0) {
-                // ret == 0 -> Botão foi pressionado DURANTE o verde.
-                LOG_INF("Botão pressionado no VERDE. Prolongando por mais 4s.");
-                
-                // Não faz nada, apenas deixa o loop repetir.
-                // Na próxima iteração, current_state ainda será STATE_GREEN
-                // e o timer de 4s será reiniciado.
-                
-            } else {
-                // ret != 0 -> Timeout de 4s esgotou (sem botão).
-                LOG_INF("Timeout de 4s (Verde). -> indo para led2 (Azul).");
-                
-                // Só transiciona se não tiver entrado em modo noturno
-                if (!g_night_mode) {
-                    gpio_pin_set_dt(&led_green, 0);
-                    current_state = STATE_RED;
-                }
+            // Só transiciona se não tiver entrado em modo noturno
+            if (!g_night_mode) {
+                gpio_pin_set_dt(&led_green, 0);
+                current_state = STATE_RED;
             }
             break;
+        // ***** FIM DA ALTERAÇÃO *****
 
         case STATE_RED:
-            // **MUDANÇA 1: Duração aumentada para 4s**
             LOG_INF("Ciclo: led2 (Limpeza) ON por 4s (ou até botão)");
             gpio_pin_set_dt(&led_green, 0);
             gpio_pin_set_dt(&led_red, 1);
             
-            // Limpa qualquer semáforo de botão pendente ANTES de esperar
+            // Limpa qualquer semáforo de botão pendente
+            // (Isso inclui cliques que ocorreram durante o STATE_GREEN)
             k_sem_reset(&button_sem);
 
-            // **MUDANÇA 1: Duração aumentada para 4s**
             // Espera pelo semáforo (botão) por no MÁXIMO 4 segundos
             ret = k_sem_take(&button_sem, K_SECONDS(4));
 
@@ -203,8 +192,7 @@ int main(void)
                 // ret == 0 -> Botão foi pressionado
                 LOG_INF("Botão pressionado no led2! Ativando delay de 1s...");
                 
-                // **MUDANÇA 2: Delay de 1s APÓS ativação no vermelho/azul**
-                // O led2 (azul) continua aceso durante este sleep.
+                // Delay de 1s APÓS ativação no vermelho/azul
                 k_sleep(K_SECONDS(1));
 
                 LOG_INF("Delay de 1s completo. -> indo para VERDE.");
