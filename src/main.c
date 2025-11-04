@@ -1,193 +1,112 @@
-/* Alterações marcadas com comentário "SYNC MOD" */
-
+/* [INÍCIO - CÓDIGO SEMÁFORO DE PEDESTRES MODIFICADO] */
 /*
- * Semáforo de Pedestres com Ciclo Automático e Botão de Interrupção
- * Placa: FRDM-KL25Z
+ * Semáforo de Pedestres Sincronizado com Semáforo de Veículos
  *
-<<<<<<< HEAD
- * Adicionado: sincronização com semáforo de veículos via PTB1 (OUT) / PTB2 (IN)
- * Estratégia de sinal: pulso ativo ALTO (~200ms) em SYNC_OUT (PTB1). Entrada SYNC_IN com pull-down e interrupt rising edge.
-=======
  * Mapeamento de Pinos:
- * - led0: LED Verde
- * - led2: LED "Vermelho" (AZUL na placa, conforme código original)
- * - PTA1: Botão de Pedestre (Configurado manualmente)
+ * - led0: LED Verde (Pedestre)
+ * - led1: LED Vermelho (Pedestre)
+ * - PTA1: Botão de Pedestre (Local)
  *
- * Modo Normal (Ciclo Automático):
- * - Verde: 4s ligado
- * - Vermelho/Azul: 4s ligado
- * - Repete...
+ * NOVOS Pinos de Sincronização:
+ * - PTB1: SYNC_OUT (Envia "REQUEST" para Veículos)
+ * - PTB2: SYNC_IN (Recebe "SAFE" dos Veículos)
  *
- * Botão (durante o Vermelho/Azul):
- * - 1. Espera 1s (com led Vermelho/Azul ainda aceso)
- * - 2. Interrompe o restante do tempo e vai para o Verde.
- *
- * Botão (durante o Verde):
- * - Ignorado. Não faz absolutamente nada.
+ * Modo Normal (Sincronizado):
+ * - Padrão: Vermelho sólido (STATE_RED_SOLID)
+ * - Botão Pressionado (PTA1):
+ * 1. Envia pulso "REQUEST" (via PTB1) para Veículos.
+ * 2. Entra em STATE_WAITING_FOR_SAFE.
+ * 3. Aguarda pulso "SAFE" (em PTB2) dos Veículos.
+ * 4. Recebe "SAFE":
+ * 5. Entra em STATE_GREEN_CYCLE: Verde (4s) -> Vermelho (2s)
+ * 6. Volta ao Padrão (STATE_RED_SOLID)
  *
  * Modo Noturno:
- * - Verde: Desligado
- * - Vermelho/Azul: Pisca (1s ligado, 1s desligado)
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+ * - Vermelho: Pisca (1s ligado, 1s desligado)
+ * - Botão e Sincronização: Ignorados
  */
-
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(semaforo_pedestre, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(semaforo_pedestre_sync, LOG_LEVEL_DBG);
 
-<<<<<<< HEAD
-/* 1. Definição dos LEDs (Usando DT, pois são da placa) */
-
-// Verde = led0
+/* 1. Definição dos LEDs (Usando DT) */
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-// Vermelho = led1
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 
 
-/* 2. Definição Manual do Botão (PTA1) - Sem Overlay */
-
-=======
-/* 1. Definição dos LEDs (Usando DT) */
-static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-// Usando 'led2' (LED AZUL) conforme o seu código original
-static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
-
-
-/* 2. Definição Manual do Botão (PTA1) - Sem Overlay */
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+/* 2. Definição Manual do Botão (PTA1) */
 const struct device *gpioa_dev = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 #define BUTTON_PIN 1
 static struct gpio_callback button_cb_data;
 
-<<<<<<< HEAD
-/* 3. Semáforo para sinalizar o evento do botão */
-K_SEM_DEFINE(button_sem, 0, 1); // Liberado pela ISR do botão (ou pela lógica de envio)
-=======
 
-/* 3. Semáforo para sinalizar o evento do botão */
-K_SEM_DEFINE(button_sem, 0, 1); // Inicia "vazio" (0, com limite de 1
+/* NOVO: 3. Definição dos Pinos de Sincronização (PTB1/PTB2) */
+const struct device *gpiob_dev = DEVICE_DT_GET(DT_NODELABEL(gpiob));
+#define SYNC_OUT_PIN     1 // PTB1
+#define SYNC_IN_PIN      2 // PTB2
+static struct gpio_callback sync_in_cb_data; // Callback para SYNC_IN
 
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
 
-/* 4. Flag de Controle do Modo Noturno */
+/* 4. Semáforos de Sinalização */
+// ISR do Botão (PTA1) -> Thread Main
+K_SEM_DEFINE(button_sem, 0, 1); 
+
+// NOVO: ISR de Sync_IN (PTB2) -> Thread Main
+K_SEM_DEFINE(safe_to_cross_sem, 0, 1); // Sinaliza "seguro" vindo do veículo
+
+
+/* 5. Flag de Controle do Modo Noturno */
 static volatile bool g_night_mode = false;
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
-/* 5. Estados da Máquina */
+/* 6. Estados da Máquina */
 enum state {
-    STATE_GREEN,
-    STATE_RED,
-    STATE_NIGHT_BLINK
+    STATE_NIGHT_BLINK,      // Modo Noturno: Piscando vermelho
+    STATE_RED_SOLID,        // Modo Normal: Vermelho sólido (esperando botão)
+    STATE_WAITING_FOR_SAFE, // NOVO: Esperando sinal "SAFE" (via SYNC_IN)
+    STATE_GREEN_CYCLE       // Modo Normal: Ciclo do verde (4s) + vermelho (2s)
 };
 
-<<<<<<< HEAD
-/* =========================
-   SYNC (SINCRONIZAÇÃO) - MODIFICAÇÕES
-   =========================
-   - SYNC_OUT : PTB1 (saída digital)
-   - SYNC_IN  : PTB2 (entrada com interrupção, pull-down)
-   - Estratégia: pulso ativo ALTO (~200ms). Entrada com pull-down detecta borda de subida.
-   - Quando o botão é pressionado, a placa pedestre envia um pulso em SYNC_OUT para a placa veículos
-     e **aguarda** um pulso de confirmação em SYNC_IN antes de iniciar seu ciclo verde.
-   - Em modo noturno, a sincronização é ignorada.
-*/
-
-/* SYNC on PORTB */
-#define SYNC_PORT   DT_NODELABEL(gpiob)  /* SYNC MOD: porta B */
-#define SYNC_OUT_PIN 1                    /* PTB1 - saída (gera pulsos) */
-#define SYNC_IN_PIN  2                    /* PTB2 - entrada com interrupção */
-
-static const struct device *sync_dev = DEVICE_DT_GET(SYNC_PORT);
-static struct gpio_callback sync_in_cb_data;
-
-/* Semáforo que a ISR SYNC_IN dá quando recebe confirmação (placa veículos confirma seguro) */
-K_SEM_DEFINE(sync_confirm_sem, 0, 1);
-
-/* Envia um pulso ativo (HIGH) por ~200ms no SYNC_OUT (bloqueante curto) */
-static void send_sync_pulse(void)
-{
-    if (!device_is_ready(sync_dev)) {
-        LOG_ERR("SYNC: PORTB não pronto para enviar pulso.");
-        return;
-    }
-
-    if (g_night_mode) {
-        LOG_DBG("SYNC: modo noturno ativo - não envia pulso.");
-        return;
-    }
-
-    gpio_pin_set(sync_dev, SYNC_OUT_PIN, 1);
-    k_msleep(200); /* pulso de 200ms */
-    gpio_pin_set(sync_dev, SYNC_OUT_PIN, 0);
-    LOG_INF("SYNC: pulso enviado em SYNC_OUT (PTB1).");
-}
-
-/* Callback da entrada SYNC_IN (recebe confirmação da placa veículos) */
-void sync_in_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    ARG_UNUSED(cb);
-    ARG_UNUSED(dev);
-
-    if (g_night_mode) {
-        LOG_DBG("SYNC: sinal recebido mas ignorado (modo noturno)");
-        return;
-    }
-
-    /* Da ISR, apenas sinalizamos o semáforo de confirmação */
-    k_sem_give(&sync_confirm_sem);
-    LOG_INF("SYNC: confirmação recebida (SYNC_IN).");
-}
-
-/* =========================
-   Fim das modificações SYNC
-   ========================= */
-
-
 /*
- * Função de Callback (ISR) do Botão
- *
- * Agora a ISR somente dá o semáforo button_sem; a thread principal fará:
- *  - enviar pulso para veículo via SYNC_OUT
- *  - aguardar confirmação via sync_confirm_sem
- *  - só então iniciar ciclo verde
+ * 7. Callback (ISR) do Botão (PTA1)
  */
 void button_pressed_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    /* Só sinaliza se NÃO estiver no modo noturno */
-=======
-
-/*
- * 6. Função de Callback (ISR) do Botão
- */
-void button_pressed_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    // A ISR apenas sinaliza. A lógica de "o que fazer"
-    // depende do estado atual (STATE_GREEN ou STATE_RED).
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+    // Só sinaliza se NÃO estiver no modo noturno
     if (!g_night_mode) {
+        // Libera o semáforo para a thread main
         k_sem_give(&button_sem);
     }
 }
 
-<<<<<<< HEAD
-=======
+/*
+ * NOVO: 8. Callback (ISR) do SYNC_IN (PTB2)
+ *
+ * Chamada quando a placa de VEÍCULOS envia o sinal "SAFE".
+ */
+void sync_in_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    if (pins & BIT(SYNC_IN_PIN)) {
+        // Sinal "SEGURO PARA ATRAVESSAR" (PTB2) recebido
+        // Só libera o semáforo se não estivermos em modo noturno
+        if (!g_night_mode) {
+            k_sem_give(&safe_to_cross_sem);
+        }
+    }
+}
+
 
 /*
- * 7. Função Main (Controladora da Máquina de Estados)
+ * 9. Função Main
  */
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
 int main(void)
 {
     int ret;
     enum state current_state;
 
-    /* LEDs via DT */
+    /* 9.1. Configuração dos LEDs (via DT) */
     if (!gpio_is_ready_dt(&led_red) || !gpio_is_ready_dt(&led_green)) {
         LOG_ERR("Dispositivo de LED não está pronto.");
         return 0;
@@ -197,103 +116,101 @@ int main(void)
     ret = gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
     if (ret < 0) return 0;
 
-    /* Configuração do Botão (Manual, sem DT/Overlay) */
+    /* 9.2. Configuração do Botão (PTA1 - Manual) */
     if (!device_is_ready(gpioa_dev)) {
         LOG_ERR("Dispositivo GPIOA (PTA1) não está pronto.");
         return 0;
     }
-<<<<<<< HEAD
-=======
-
-    // Configura o pino PTA1 como entrada com pull-up interno
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+    // Configura o pino PTA1 como entrada com pull-up interno.
     ret = gpio_pin_configure(gpioa_dev, BUTTON_PIN, (GPIO_INPUT | GPIO_PULL_UP));
     if (ret < 0) {
         LOG_ERR("Falha ao configurar botão PTA1.");
         return 0;
     }
-<<<<<<< HEAD
-=======
-
-    // Configura a interrupção 
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+    // Configura a interrupção para borda de descida
     ret = gpio_pin_interrupt_configure(gpioa_dev, BUTTON_PIN, GPIO_INT_EDGE_TO_ACTIVE);
     if (ret < 0) {
         LOG_ERR("Falha ao configurar interrupção do botão.");
         return 0;
     }
+    // Adiciona a função de callback para a interrupção do botão
     gpio_init_callback(&button_cb_data, button_pressed_callback, BIT(BUTTON_PIN));
     gpio_add_callback(gpioa_dev, &button_cb_data);
 
-    /* SYNC MOD: configurar SYNC_OUT e SYNC_IN em PORTB */
-    if (!device_is_ready(sync_dev)) {
-        LOG_ERR("SYNC: PORTB não pronto. Sincronização desabilitada.");
-        /* prosseguimos sem sync (mas o código assume sync_dev pronto para testes) */
-    } else {
-        ret = gpio_pin_configure(sync_dev, SYNC_OUT_PIN, GPIO_OUTPUT_INACTIVE);
-        if (ret < 0) {
-            LOG_ERR("Falha ao configurar SYNC_OUT PTB1: %d", ret);
-        }
-        /* SYNC_IN: entrada com pull-down e interrupção na borda de subida (active HIGH pulse) */
-        ret = gpio_pin_configure(sync_dev, SYNC_IN_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-        if (ret < 0) {
-            LOG_ERR("Falha ao configurar SYNC_IN PTB2: %d", ret);
-        } else {
-            ret = gpio_pin_interrupt_configure(sync_dev, SYNC_IN_PIN, GPIO_INT_EDGE_TO_ACTIVE);
-            if (ret < 0) {
-                LOG_ERR("Falha ao configurar interrupção SYNC_IN: %d", ret);
-            } else {
-                gpio_init_callback(&sync_in_cb_data, sync_in_callback, BIT(SYNC_IN_PIN));
-                gpio_add_callback(sync_dev, &sync_in_cb_data);
-                LOG_INF("SYNC: configurado PTB1 (OUT) / PTB2 (IN int)");
-            }
-        }
+    /* * NOVO: 9.3. Configuração dos Pinos de Sincronização (PTB1/PTB2) 
+     */
+    if (!device_is_ready(gpiob_dev)) {
+        LOG_ERR("Erro: GPIOB (PTB1/PTB2) não está pronto.");
+        return 0;
     }
 
-    /* Estado Inicial */
+    /* 9.3.1. Configurar SYNC_OUT (PTB1) - Saída, Nível Alto (Inativo) */
+    ret = gpio_pin_configure(gpiob_dev, SYNC_OUT_PIN, GPIO_OUTPUT_INACTIVE | GPIO_PULL_UP);
+    if (ret < 0) {
+        LOG_ERR("Erro %d ao configurar SYNC_OUT (PTB1)", ret);
+        return 0;
+    }
+    gpio_pin_set(gpiob_dev, SYNC_OUT_PIN, 1); // Garante estado inativo ALTO
+
+    /* 9.3.2. Configurar SYNC_IN (PTB2) - Entrada, Pull-up, Interrupção Borda de Descida */
+    ret = gpio_pin_configure(gpiob_dev, SYNC_IN_PIN, (GPIO_INPUT | GPIO_PULL_UP));
+    if (ret < 0) {
+        LOG_ERR("Erro %d ao configurar SYNC_IN (PTB2)", ret);
+        return 0;
+    }
+    ret = gpio_pin_interrupt_configure(gpiob_dev, SYNC_IN_PIN, GPIO_INT_EDGE_TO_ACTIVE); // (Ativo Baixo)
+    if (ret < 0) {
+        LOG_ERR("Erro %d ao configurar interrupção SYNC_IN", ret);
+        return 0;
+    }
+
+    /* 9.3.3. Adicionar Callback para SYNC_IN (PTB2) */
+    gpio_init_callback(&sync_in_cb_data, sync_in_callback, BIT(SYNC_IN_PIN));
+    gpio_add_callback(gpiob_dev, &sync_in_cb_data);
+
+    LOG_INF("Pinos de Sincronização (PTB1/PTB2) configurados.");
+
+
+    /* 9.4. Define o Estado Inicial */
     if (g_night_mode) {
         LOG_INF("Semáforo Iniciado em MODO NOTURNO");
         current_state = STATE_NIGHT_BLINK;
-        gpio_pin_set_dt(&led_green, 0); 
+        gpio_pin_set_dt(&led_green, 0); // Verde sempre desligado à noite
     } else {
-        LOG_INF("Semáforo Iniciado em MODO NORMAL (Ciclo Automático)");
-        current_state = STATE_GREEN; // Inicia no Verde
-        gpio_pin_set_dt(&led_red, 0); // Garante que o azul comece apagado
+        LOG_INF("Semáforo Iniciado em MODO NORMAL (Aguardando Botão)");
+        current_state = STATE_RED_SOLID;
+        gpio_pin_set_dt(&led_green, 0);
+        gpio_pin_set_dt(&led_red, 1); // Estado padrão: Vermelho aceso
     }
 
-    /* Loop Principal (Máquina de Estados) */
+    /* 9.5. Loop Principal (Máquina de Estados) */
     while (1) {
-        
-        // Checagem global de Modo Noturno a cada iteração
-        if (g_night_mode) {
-            if(current_state != STATE_NIGHT_BLINK) {
-                LOG_INF("Entrando no MODO NOTURNO.");
-                current_state = STATE_NIGHT_BLINK;
-                gpio_pin_set_dt(&led_green, 0); // Apaga verde
-                gpio_pin_set_dt(&led_red, 0); // Apaga azul (antes de piscar)
-            }
-        } else if (current_state == STATE_NIGHT_BLINK) {
-            // Saindo do modo noturno
-            LOG_INF("Saindo do MODO NOTURNO -> MODO NORMAL");
-            current_state = STATE_GREEN; // Volta ao ciclo normal
-        }
-
-
         switch (current_state) {
 
         case STATE_NIGHT_BLINK:
-            LOG_INF("Modo Noturno: led2 ON");
+            // Lógica do Modo Noturno
+            LOG_INF("Modo Noturno: Vermelho ON");
             gpio_pin_set_dt(&led_red, 1);
             k_sleep(K_SECONDS(1));
             
-            if (g_night_mode) { // Checa de novo caso tenha mudado durante o sleep
-                LOG_INF("Modo Noturno: led2 OFF");
+            if (g_night_mode) { // Checa se ainda está em modo noturno
+                LOG_INF("Modo Noturno: Vermelho OFF");
                 gpio_pin_set_dt(&led_red, 0);
                 k_sleep(K_SECONDS(1));
             }
+
+            // Checa se o modo mudou
+            if (!g_night_mode) {
+                LOG_INF("Mudando para MODO NORMAL.");
+                current_state = STATE_RED_SOLID;
+                gpio_pin_set_dt(&led_red, 1); // Acende o vermelho
+                
+                // Limpa semáforos caso algo tenha ocorrido durante a transição
+                k_sem_reset(&button_sem);
+                k_sem_reset(&safe_to_cross_sem);
+            }
             break;
 
-<<<<<<< HEAD
         case STATE_RED_SOLID:
             // Lógica do Modo Normal (Padrão)
             if (g_night_mode) { // Checa se o modo mudou
@@ -303,21 +220,46 @@ int main(void)
                 break;
             }
 
-            // Espera botão (ISR libera button_sem)
-            LOG_INF("Estado: Vermelho Sólido. Esperando botão...");
+            // Fica "preso" aqui esperando o semáforo do BOTÃO (PTA1)
+            LOG_INF("Estado: Vermelho Sólido. Esperando botão (PTA1)...");
             k_sem_take(&button_sem, K_FOREVER);
-
+            
             // Se chegamos aqui, o botão foi pressionado (e não estamos no modo noturno)
-            LOG_INF("Botão recebido! Enviando pedido ao semáforo de veículos (SYNC_OUT) e aguardando confirmação...");
-            /* SYNC MOD: enviar pulso para a placa de veículos solicitando travessia */
-            send_sync_pulse();
+            
+            /* * NOVO: Enviar pulso de "REQUEST" (via SYNC_OUT - PTB1)
+             */
+            LOG_INF("Botão recebido! Enviando PEDIDO (SYNC_OUT PTB1) para veículos.");
+            gpio_pin_set(gpiob_dev, SYNC_OUT_PIN, 0); // Nível BAIXO (Ativo)
+            k_msleep(100); // Duração do pulso
+            gpio_pin_set(gpiob_dev, SYNC_OUT_PIN, 1); // Nível ALTO (Inativo via Pull-up)
 
-            /* Aguardar confirmação da placa de veículos via SYNC_IN (semáforo sync_confirm_sem) */
-            LOG_INF("Aguardando confirmação do semáforo de veículos (SYNC_IN)...");
-            k_sem_take(&sync_confirm_sem, K_FOREVER); /* Bloqueia até receber confirmação */
-            LOG_INF("Confirmação recebida! Iniciando ciclo verde.");
+            LOG_INF("Pedido enviado. Aguardando sinal SEGURO (SYNC_IN PTB2)...");
+            current_state = STATE_WAITING_FOR_SAFE; // Mudar para o novo estado de espera
+            break;
 
-            current_state = STATE_GREEN_CYCLE;
+        /* NOVO ESTADO DE ESPERA */
+        case STATE_WAITING_FOR_SAFE:
+            /* Espera pelo sinal "SEGURO" (safe_to_cross_sem) vindo do veículo (via PTB2) */
+
+            // Checa se o modo noturno foi ativado *enquanto* esperava
+            if (g_night_mode) { 
+                LOG_INF("Modo noturno ativado enquanto esperava. Cancelando pedido.");
+                current_state = STATE_NIGHT_BLINK;
+                gpio_pin_set_dt(&led_red, 0); 
+                k_sem_reset(&safe_to_cross_sem); // Limpa o semáforo caso o sinal chegue tarde
+                break;
+            }
+
+            // Tenta pegar o semáforo (liberado pela ISR do SYNC_IN - PTB2)
+            // Usamos um timeout de 200ms para checar o modo noturno periodicamente
+            if (k_sem_take(&safe_to_cross_sem, K_MSEC(200)) == 0) {
+                // Sucesso! Sinal recebido.
+                LOG_INF("Sinal SEGURO (SYNC_IN) recebido! Iniciando ciclo verde.");
+                current_state = STATE_GREEN_CYCLE;
+            }
+            
+            // Se k_sem_take falhar (timeout), o loop principal roda de novo,
+            // entra neste case, checa g_night_mode, e tenta pegar o semáforo novamente.
             break;
 
         case STATE_GREEN_CYCLE:
@@ -325,71 +267,34 @@ int main(void)
             
             // "imediatamente verde"
             LOG_INF("Ciclo: VERDE (Ande) ON por 4s");
-=======
-        // ***** INÍCIO DA ALTERAÇÃO *****
-        case STATE_GREEN:
-            LOG_INF("Ciclo: VERDE (led0) ON por 4s");
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
             gpio_pin_set_dt(&led_red, 0);
             gpio_pin_set_dt(&led_green, 1);
-            
-            // Dorme por 4s (Não pode ser interrompido pelo botão)
-            // A ISR do botão ainda vai disparar e dar k_sem_give(),
-            // mas esse semáforo será limpo no início do STATE_RED.
-            k_sleep(K_SECONDS(4)); 
-            
-            LOG_INF("Timeout de 4s (Verde). -> indo para led2 (Azul).");
+            k_sleep(K_SECONDS(4));
 
-            // Só transiciona se não tiver entrado em modo noturno
-            if (!g_night_mode) {
-                gpio_pin_set_dt(&led_green, 0);
-                current_state = STATE_RED;
-            }
-            break;
-        // ***** FIM DA ALTERAÇÃO *****
-
-        case STATE_RED:
-            LOG_INF("Ciclo: led2 (Limpeza) ON por 4s (ou até botão)");
+            // "continue o ciclo"
+            LOG_INF("Ciclo: VERDE OFF");
             gpio_pin_set_dt(&led_green, 0);
+            LOG_INF("Ciclo: VERMELHO (Limpeza) ON por 2s");
             gpio_pin_set_dt(&led_red, 1);
+            k_sleep(K_SECONDS(2));
+
+            // Ciclo completo, volta ao estado padrão
+            LOG_INF("Ciclo completo. Voltando ao estado Vermelho Sólido.");
             
-            // Limpa qualquer semáforo de botão pendente
-            // (Isso inclui cliques que ocorreram durante o STATE_GREEN)
+            // Limpa qualquer clique de botão (PTA1) que tenha ocorrido durante o ciclo
             k_sem_reset(&button_sem);
-
-            // Espera pelo semáforo (botão) por no MÁXIMO 4 segundos
-            ret = k_sem_take(&button_sem, K_SECONDS(4));
-
-            if (ret == 0) {
-                // ret == 0 -> Botão foi pressionado
-                LOG_INF("Botão pressionado no led2! Ativando delay de 1s...");
-                
-                // Delay de 1s APÓS ativação no vermelho/azul
-                k_sleep(K_SECONDS(1));
-
-                LOG_INF("Delay de 1s completo. -> indo para VERDE.");
-                
-            } else {
-                // ret != 0 -> Timeout de 4s esgotou
-                LOG_INF("Timeout de 4s (led2). -> indo para VERDE.");
-            }
+            // Limpa o semáforo de "seguro" (PTB2)
+            k_sem_reset(&safe_to_cross_sem);
             
-            // Em ambos os casos (botão + delay OU timeout), o próximo estado é VERDE
-            if (!g_night_mode) {
-                gpio_pin_set_dt(&led_red, 0);
-                current_state = STATE_GREEN;
-            }
+            current_state = STATE_RED_SOLID;
+            // O LED vermelho já está aceso, pronto para o estado STATE_RED_SOLID
             break;
         }
-        
-        // Pequeno sleep para o scheduler
+
+        // Pequeno sleep para evitar que o loop rode "solto"
         k_sleep(K_MSEC(10));
     }
-<<<<<<< HEAD
 
     return 0; // Nunca alcançado
 }
-=======
-    return 0;
-}
->>>>>>> 965aeb510df337c18aa049fcc7d28c009aeb6db5
+/* [FIM - CÓDIGO SEMÁFORO DE PEDESTRES MODIFICADO] */
