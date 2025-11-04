@@ -1,3 +1,7 @@
+/* Alterações marcadas com comentário "SYNC MOD" */
+
+/* Código original do semáforo de veículos com adição de sincronização via PTB1/PTB2 */
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -137,6 +141,74 @@ static bool sleep_with_checks(uint32_t total_ms)
     }
     return false; // completou sem interrupções
 }
+
+/* =========================
+   SYNC (SINCRONIZAÇÃO) - MODIFICAÇÕES
+   =========================
+   - SYNC_OUT : PTB1 (saída digital)
+   - SYNC_IN  : PTB2 (entrada com interrupção, pull-down)
+   - Estratégia: pulso ativo ALTO (~200ms). Entradas com pull-down, interrupção na borda de subida.
+   - Quando SYNC_IN é recebido (de placa pedestre), marcamos ped_request (se permitido).
+   - Quando ciclo de travessia (RED pedestre) terminar, a placa veículos envia um pulso de confirmação via SYNC_OUT.
+*/
+
+/* SYNC on PORTB */
+#define SYNC_PORT   DT_NODELABEL(gpiob)  /* SYNC MOD: porta B */
+#define SYNC_OUT_PIN 1                    /* PTB1 - saída (gera pulsos) */
+#define SYNC_IN_PIN  2                    /* PTB2 - entrada com interrupção */
+
+static const struct device *sync_dev = DEVICE_DT_GET(SYNC_PORT);
+static struct gpio_callback sync_in_cb_data;
+
+/* Envia um pulso ativo (HIGH) por ~200ms no SYNC_OUT (bloqueante curto) */
+static void send_sync_pulse(void)
+{
+    if (!device_is_ready(sync_dev)) {
+        printk("SYNC: dispositivo PORTB não pronto para enviar pulso.\n");
+        return;
+    }
+
+    /* Se em modo noturno, não envia sinal (requisito: modo noturno ignora sincronização) */
+    if (atomic_get(&night_mode)) {
+        printk("SYNC: modo noturno ativo - não envia pulso.\n");
+        return;
+    }
+
+    gpio_pin_set(sync_dev, SYNC_OUT_PIN, 1);
+    /* pequeno delay (200ms) para garantir detecção */
+    k_msleep(200);
+    gpio_pin_set(sync_dev, SYNC_OUT_PIN, 0);
+
+    printk("SYNC: pulso de confirmação enviado (SYNC_OUT PTB1).\n");
+}
+
+/* Callback da entrada SYNC_IN (recebe sinal da placa pedestre) */
+void sync_in_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    ARG_UNUSED(cb);
+    ARG_UNUSED(dev);
+
+    /* Ignorar se modo noturno ativo */
+    if (atomic_get(&night_mode)) {
+        printk("SYNC: sinal recebido mas ignorado (modo noturno ativo).\n");
+        return;
+    }
+
+    /* Ao receber sinal do pedestre, marcamos ped_request se a regra permitir (igual a request_pedestrian_crossing) */
+    int state = atomic_get(&current_state);
+    if (!(state == 0 || state == 1)) {
+        printk("SYNC: sinal recebido, porém estado atual não aceita atendimento (estado=%d). Ignorando.\n", state);
+        return;
+    }
+
+    /* Marca pedido - a máquina de estados consumirá essa flag como se fosse um botão */
+    atomic_set(&ped_request, 1);
+    printk("SYNC: sinal recebido do pedestre - ped_request setado (estado atual=%d).\n", state);
+}
+
+/* =========================
+   Fim das modificações SYNC
+   ========================= */
 
 /* GREEN THREAD */
 void green_thread(void)
@@ -295,6 +367,10 @@ void red_thread(void)
                 elapsed += CHUNK_MS;
                 /* ignorar ped_request enquanto ped_active == 1 */
             }
+
+            /* Antes de finalizar atendimento, enviar confirmação de volta à placa pedestre */
+            send_sync_pulse(); /* SYNC MOD: confirma ao pedestre que o ciclo terminou */
+
             /* finalizar atendimento pedestre */
             atomic_set(&ped_active, 0);
             printk("RED (pedestre) finalizado. Voltando ao ciclo normal (GREEN).\n");
@@ -383,7 +459,7 @@ void button_thread(void)
 
         /* Detecta borda de descida: 1 → 0 = botão pressionado */
         if (last_state == 1 && state == 0) {
-            printk("Botão de pedestre pressionado\n");
+            printk("Botão de pedestre (local) pressionado\n");
             request_pedestrian_crossing();
         }
 
@@ -391,7 +467,6 @@ void button_thread(void)
         k_msleep(50); // polling a cada 50ms
     }
 }
-
 
 /* Cria threads */
 K_THREAD_DEFINE(green_tid,  512, green_thread,      NULL, NULL, NULL, 1, 0, 0);
@@ -415,6 +490,31 @@ void main(void)
         if (ret < 0) {
             printk("Erro %d ao configurar LED %d\n", ret, i);
             return;
+        }
+    }
+
+    /* SYNC MOD: configurar SYNC_OUT e SYNC_IN em PORTB */
+    if (!device_is_ready(sync_dev)) {
+        printk("Erro: PORTB não pronto para SYNC\n");
+        /* prosseguimos sem sync para permitir testes locais */
+    } else {
+        ret = gpio_pin_configure(sync_dev, SYNC_OUT_PIN, GPIO_OUTPUT_INACTIVE);
+        if (ret < 0) {
+            printk("Erro %d ao configurar SYNC_OUT PTB1\n", ret);
+        }
+        /* SYNC_IN: entrada com pull-down e interrupção na borda de subida (active HIGH pulse) */
+        ret = gpio_pin_configure(sync_dev, SYNC_IN_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
+        if (ret < 0) {
+            printk("Erro %d ao configurar SYNC_IN PTB2\n", ret);
+        } else {
+            ret = gpio_pin_interrupt_configure(sync_dev, SYNC_IN_PIN, GPIO_INT_EDGE_TO_ACTIVE);
+            if (ret < 0) {
+                printk("Erro %d ao configurar interrupção SYNC_IN\n", ret);
+            } else {
+                gpio_init_callback(&sync_in_cb_data, sync_in_callback, BIT(SYNC_IN_PIN));
+                gpio_add_callback(sync_dev, &sync_in_cb_data);
+                printk("SYNC: configurado PTB1 (OUT) / PTB2 (IN int)\n");
+            }
         }
     }
 
