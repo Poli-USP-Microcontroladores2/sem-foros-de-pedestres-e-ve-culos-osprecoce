@@ -37,8 +37,13 @@ K_MUTEX_DEFINE(led_mutex);
 static atomic_t night_mode = ATOMIC_INIT(0);   // 0=normal, 1=noturno
 
 /* Flag de pedido de travessia (pedestre) e indicador de pedido em andamento */
-static atomic_t ped_request = ATOMIC_INIT(0);  // 0=nenhum, 1=pedido
-static atomic_t ped_active  = ATOMIC_INIT(0);  // 0=nenhum, 1=em progresso
+static atomic_t ped_request = ATOMIC_INIT(0);  // 0=nenhum, 1=pedido pendente
+static atomic_t ped_active  = ATOMIC_INIT(0);  // 0=nenhum, 1=em progresso (RED pedestre)
+
+/* Estado atual do semáforo (para decisões ao receber pedido)
+   0 = GREEN, 1 = YELLOW, 2 = RED
+*/
+static atomic_t current_state = ATOMIC_INIT(0);
 
 /* Funções para controlar flags */
 void set_night_mode(bool enable)
@@ -51,7 +56,14 @@ void set_night_mode(bool enable)
     }
 }
 
-/* Solicita travessia de pedestres (por flag). Retorna true se aceito, false se ignorado. */
+/* Solicita travessia de pedestres (por flag). Retorna true se aceito, false se ignorado.
+   Regras implementadas:
+   - Ignora em modo noturno
+   - Ignora se já existe ped_active (já atendendo)
+   - Aceita apenas se estado atual for GREEN ou YELLOW
+   - Se aceito, marca ped_request = 1; NOTA: comportamento específico (interromper green / aguardar yellow) é
+     implementado nas threads que consultam estas flags.
+*/
 bool request_pedestrian_crossing(void)
 {
     /* Ignorar pedidos no modo noturno */
@@ -60,15 +72,22 @@ bool request_pedestrian_crossing(void)
         return false;
     }
 
-    /* Ignorar se já existe um em andamento */
+    /* Ignorar se já existe um atendimento em andamento */
     if (atomic_get(&ped_active)) {
         printk("Pedido de pedestre ignorado: já em progresso.\n");
         return false;
     }
 
-    /* Marcar pedido */
+    int state = atomic_get(&current_state);
+    if (!(state == 0 || state == 1)) {
+        /* Se não estivermos em GREEN (0) ou YELLOW (1), ignorar */
+        printk("Pedido de pedestre ignorado: estado atual não permite atendimento (estado=%d).\n", state);
+        return false;
+    }
+
+    /* Aceitar pedido: marcar ped_request (será consumido pela sequência apropriada) */
     atomic_set(&ped_request, 1);
-    printk("Pedido de travessia recebido (flag set).\n");
+    printk("Pedido de travessia recebido (flag set). Estado atual=%d\n", state);
     return true;
 }
 
@@ -131,15 +150,8 @@ void green_thread(void)
 
         k_sem_take(&sem_green, K_FOREVER);
 
-        /* Antes de acender, verificar se chegou pedido de pedestre */
-        if (atomic_get(&ped_request) && !atomic_get(&night_mode)) {
-            /* converter pedido em ativo e direcionar para red imediatamente */
-            atomic_set(&ped_request, 0);
-            atomic_set(&ped_active, 1);
-            printk("Interrupção: green -> encaminhando para RED por pedido pedestre.\n");
-            k_sem_give(&sem_red);
-            continue; /* volta ao loop sem acender */
-        }
+        /* Setar estado atual para GREEN */
+        atomic_set(&current_state, 0);
 
         k_mutex_lock(&led_mutex, K_FOREVER);
         leds_off();
@@ -153,20 +165,22 @@ void green_thread(void)
             if (atomic_get(&night_mode)) {
                 gpio_pin_set_dt(&led_green, 0);
                 k_mutex_unlock(&led_mutex);
-                /* voltar — night_mode_thread ficará responsável */
                 continue;
             }
 
-            /* Interrompido por pedido pedestre */
+            /* Interrompido por pedido pedestre *ENQUANTO EM GREEN* */
             if (atomic_get(&ped_request)) {
-                /* Prepara o estado de atendimento pedestre */
-                atomic_set(&ped_request, 0);
-                atomic_set(&ped_active, 1);
+                /* Não consumimos ped_request aqui: queremos que o fluxo faça AMARELO (1s) e
+                   depois RED pedestre (4s). Portanto, somente sinalizamos a transição para YELLOW.
+                */
                 gpio_pin_set_dt(&led_green, 0);
                 k_mutex_unlock(&led_mutex);
 
-                printk("Green interrompido: direcionando para RED (pedestre)\n");
-                k_sem_give(&sem_red);
+                printk("Green interrompido por pedido: irá para YELLOW (1s) então RED pedestre.\n");
+
+                /* indicar que próxima fase é YELLOW */
+                atomic_set(&current_state, 1);
+                k_sem_give(&sem_yellow);
                 continue;
             }
         }
@@ -191,41 +205,60 @@ void yellow_thread(void)
 
         k_sem_take(&sem_yellow, K_FOREVER);
 
-        /* Antes de acender, verificar pedido pedestre */
-        if (atomic_get(&ped_request) && !atomic_get(&night_mode)) {
+        /* Setar estado atual para YELLOW */
+        atomic_set(&current_state, 1);
+
+        k_mutex_lock(&led_mutex, K_FOREVER);
+        leds_off();
+        /* representação: amarelo = ambos LEDs acesos */
+        gpio_pin_set_dt(&led_green, 1);
+        gpio_pin_set_dt(&led_red, 1);
+
+        /* piscar amarelo no modo normal (aqui amarelo é 1s) = 1000ms
+           Importante: se ped_request ocorrer DURANTE o amarelo, NÃO reiniciamos o amarelo;
+           deixamos terminar e depois vamos para RED pedestre.
+        */
+        const uint32_t TOTAL_YELLOW_MS = 1000;
+        uint32_t elapsed = 0;
+        const uint32_t CHUNK_MS = 100;
+        bool early_night = false;
+
+        while (elapsed < TOTAL_YELLOW_MS) {
+            uint32_t t = MIN(CHUNK_MS, TOTAL_YELLOW_MS - elapsed);
+            k_msleep(t);
+            elapsed += t;
+
+            if (atomic_get(&night_mode)) {
+                early_night = true;
+                break;
+            }
+            /* Note: não agimos imediatamente se ped_request aparece — apenas registramos que há um pedido
+               e após o amarelo terminar o trataremos.
+            */
+        }
+
+        if (early_night) {
+            /* se modo noturno ativado, desligar e liberar mutex */
+            leds_off();
+            k_mutex_unlock(&led_mutex);
+            continue;
+        }
+
+        /* Após completar o amarelo (ou terminar o tempo restante), verificar se há pedido pedestre pendente */
+        if (atomic_get(&ped_request) && !atomic_get(&ped_active) && !atomic_get(&night_mode)) {
+            /* Consumir pedido e marcar atendimento pedestre */
             atomic_set(&ped_request, 0);
             atomic_set(&ped_active, 1);
-            printk("Interrupção: yellow -> encaminhando para RED por pedido pedestre.\n");
+
+            leds_off();
+            k_mutex_unlock(&led_mutex);
+
+            printk("Yellow terminou: iniciando RED pedestre por 4s.\n");
             k_sem_give(&sem_red);
             continue;
         }
 
-        k_mutex_lock(&led_mutex, K_FOREVER);
-        leds_off();
-        gpio_pin_set_dt(&led_green, 1);
-        gpio_pin_set_dt(&led_red, 1);  // amarelo
-
-        /* piscar amarelo no modo normal (aqui amarelo é 1s) = 1000ms */
-        bool interrupted = sleep_with_checks(1000);
-
-        if (interrupted) {
-            if (atomic_get(&night_mode)) {
-                /* se modo noturno ativado, desligar e liberar mutex */
-                leds_off();
-                k_mutex_unlock(&led_mutex);
-                continue;
-            }
-            if (atomic_get(&ped_request)) {
-                atomic_set(&ped_request, 0);
-                atomic_set(&ped_active, 1);
-                leds_off();
-                k_mutex_unlock(&led_mutex);
-                printk("Yellow interrompido: direcionando para RED (pedestre)\n");
-                k_sem_give(&sem_red);
-                continue;
-            }
-        }
-
+        /* Sem pedido pendente: sequência normal -> RED */
         leds_off();
         k_mutex_unlock(&led_mutex);
 
@@ -245,13 +278,8 @@ void red_thread(void)
 
         k_sem_take(&sem_red, K_FOREVER);
 
-        /* Se ped_active já estiver marcado, este red é para pedestres.
-           Caso ped_request esteja marcado (vindo de outra thread), consumi-lo aqui. */
-        if (atomic_get(&ped_request) && !atomic_get(&ped_active) && !atomic_get(&night_mode)) {
-            atomic_set(&ped_request, 0);
-            atomic_set(&ped_active, 1);
-            printk("Red recebeu pedido pedestre e assume o atendimento.\n");
-        }
+        /* Setar estado atual para RED */
+        atomic_set(&current_state, 2);
 
         k_mutex_lock(&led_mutex, K_FOREVER);
         leds_off();
@@ -260,7 +288,6 @@ void red_thread(void)
         if (atomic_get(&ped_active)) {
             /* Atendimento de pedestre: permanecer 4s e ignorar novos pedidos nesse intervalo */
             printk("RED (pedestre) aceso por 4s. Novos pedidos ignorados.\n");
-            /* dormir 4s em fatias, mas não responder a novos ped_request (eles serão ignorados) */
             const uint32_t CHUNK_MS = 100;
             uint32_t elapsed = 0;
             while (elapsed < 4000) {
@@ -279,10 +306,10 @@ void red_thread(void)
             continue;
         } else {
             /* RED normal: 4s (como parte do ciclo) mas pode ser interrompido por pedido pedestre
-               — então dormimos em fatias checando ped_request */
+               — então dormimos em fatias checando ped_request
+            */
             bool interrupted = false;
 
-            /* dorme 4000ms checando ped_request/mode */
             const uint32_t CHUNK_MS = 100;
             uint32_t elapsed = 0;
             while (elapsed < 4000) {
@@ -294,11 +321,12 @@ void red_thread(void)
                     break;
                 }
                 if (atomic_get(&ped_request)) {
-                    /* marca ped_active, consome ped_request e interrompe para atendimento */
-                    atomic_set(&ped_request, 0);
-                    atomic_set(&ped_active, 1);
-                    interrupted = true;
-                    break;
+                    /* Se ped_request surge durante RED normal, devemos IGNORAR conforme especificação */
+                    /* Portanto NÃO consumimos ped_request aqui; apenas registramos que houve tentativa e
+                       deixamos o ciclo normal completar. */
+                    printk("Pedido de pedestre recebido durante RED normal: ignorado.\n");
+                    /* opcional: clear ped_request para evitar tentativa futura? Não remover — assumir que
+                       request_pedestrian_crossing já teria recusado se estado fosse RED. */
                 }
             }
 
@@ -310,30 +338,7 @@ void red_thread(void)
                 continue;
             }
 
-            if (atomic_get(&ped_active)) {
-                /* Se ped_active agora é 1, é porque foi acionado durante o red normal */
-                /* Precisamos acender red por 4s adicionais (atendimento pedestre) */
-                printk("RED interrompido para atender pedestre: completando 4s ped.\n");
-                /* Re-entrar no red pedestre: dar o sem_red para que o fluxo entre novamente.
-                   Mas como já estamos aqui, podemos tratar diretamente: */
-                k_mutex_lock(&led_mutex, K_FOREVER);
-                gpio_pin_set_dt(&led_red, 1);
-                const uint32_t CHUNK_MS2 = 100;
-                uint32_t elapsed2 = 0;
-                while (elapsed2 < 4000) {
-                    k_msleep(CHUNK_MS2);
-                    elapsed2 += CHUNK_MS2;
-                }
-                atomic_set(&ped_active, 0);
-                leds_off();
-                k_mutex_unlock(&led_mutex);
-
-                /* Após atendimento pedestre, reiniciar pelo verde */
-                k_sem_give(&sem_green);
-                continue;
-            }
-
-            /* Se não houve interrupção, segue sequencia normal */
+            /* Segue sequencia normal */
             k_sem_give(&sem_green);
         }
     }
@@ -414,6 +419,7 @@ void main(void)
     }
 
     /* Garante que o ciclo inicie por green */
+    atomic_set(&current_state, 0);
     k_sem_give(&sem_green);
 
     /* main fica em loop para não encerrar */
