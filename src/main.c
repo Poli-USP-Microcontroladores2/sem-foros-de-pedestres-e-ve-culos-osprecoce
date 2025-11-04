@@ -11,6 +11,12 @@
 #define LED_GREEN_NODE   DT_ALIAS(led0)
 #define LED_RED_NODE     DT_ALIAS(led2)
 
+/* Definição do Botão PTA1 */
+#define BUTTON_PORT  DT_NODELABEL(gpioa)
+#define BUTTON_PIN   1
+
+static const struct device *button_dev = DEVICE_DT_GET(BUTTON_PORT);
+
 #if !DT_NODE_HAS_STATUS(LED_GREEN_NODE, okay) || \
     !DT_NODE_HAS_STATUS(LED_RED_NODE, okay)
 #error "Faltam alias led0 ou led2 no Device Tree"
@@ -355,11 +361,40 @@ void night_mode_thread(void)
     }
 }
 
+void button_thread(void)
+{
+    /* Configuração do pino PTA1 */
+    if (!device_is_ready(button_dev)) {
+        printk("Erro: GPIOA não está pronto para o botão\n");
+        return;
+    }
+
+    gpio_pin_configure(button_dev, BUTTON_PIN, GPIO_INPUT | GPIO_PULL_UP);
+
+    uint8_t last_state = 1; // pull-up → repouso = 1
+
+    while (1) {
+        uint8_t state = gpio_pin_get(button_dev, BUTTON_PIN);
+
+        /* Detecta borda de descida: 1 → 0 = botão pressionado */
+        if (last_state == 1 && state == 0) {
+            printk("Botão de pedestre pressionado\n");
+            request_pedestrian_crossing();
+        }
+
+        last_state = state;
+        k_msleep(50); // polling a cada 50ms
+    }
+}
+
+
 /* Cria threads */
 K_THREAD_DEFINE(green_tid,  512, green_thread,      NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(yellow_tid, 512, yellow_thread,     NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(red_tid,    512, red_thread,        NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(night_tid,  512, night_mode_thread, NULL, NULL, NULL, 1, 0, 0);
+K_THREAD_DEFINE(button_tid, 512, button_thread, NULL, NULL, NULL, 2, 0, 0);
+
 
 void main(void)
 {
