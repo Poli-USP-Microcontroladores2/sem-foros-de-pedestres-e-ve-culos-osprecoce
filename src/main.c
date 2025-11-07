@@ -15,7 +15,13 @@
 #define BUTTON_PORT  DT_NODELABEL(gpioa)
 #define BUTTON_PIN   1
 
+/* NOVO: Definição da porta PTA2 como entrada */
+#define INPUT_PORT   DT_NODELABEL(gpioa)
+#define INPUT_PIN    2
+
 static const struct device *button_dev = DEVICE_DT_GET(BUTTON_PORT);
+/* NOVO: device para PTA2 */
+static const struct device *input_dev  = DEVICE_DT_GET(INPUT_PORT);
 
 #if !DT_NODE_HAS_STATUS(LED_GREEN_NODE, okay) || \
     !DT_NODE_HAS_STATUS(LED_RED_NODE, okay)
@@ -56,23 +62,13 @@ void set_night_mode(bool enable)
     }
 }
 
-/* Solicita travessia de pedestres (por flag). Retorna true se aceito, false se ignorado.
-   Regras implementadas:
-   - Ignora em modo noturno
-   - Ignora se já existe ped_active (já atendendo)
-   - Aceita apenas se estado atual for GREEN ou YELLOW
-   - Se aceito, marca ped_request = 1; NOTA: comportamento específico (interromper green / aguardar yellow) é
-     implementado nas threads que consultam estas flags.
-*/
 bool request_pedestrian_crossing(void)
 {
-    /* Ignorar pedidos no modo noturno */
     if (atomic_get(&night_mode)) {
         printk("Pedido de pedestre ignorado: modo noturno ativo.\n");
         return false;
     }
 
-    /* Ignorar se já existe um atendimento em andamento */
     if (atomic_get(&ped_active)) {
         printk("Pedido de pedestre ignorado: já em progresso.\n");
         return false;
@@ -80,42 +76,21 @@ bool request_pedestrian_crossing(void)
 
     int state = atomic_get(&current_state);
     if (!(state == 0 || state == 1)) {
-        /* Se não estivermos em GREEN (0) ou YELLOW (1), ignorar */
         printk("Pedido de pedestre ignorado: estado atual não permite atendimento (estado=%d).\n", state);
         return false;
     }
 
-    /* Aceitar pedido: marcar ped_request (será consumido pela sequência apropriada) */
     atomic_set(&ped_request, 1);
     printk("Pedido de travessia recebido (flag set). Estado atual=%d\n", state);
     return true;
 }
 
-/* Desliga LEDs */
 void leds_off(void)
 {
     gpio_pin_set_dt(&led_green, 0);
     gpio_pin_set_dt(&led_red,  0);
 }
 
-/* helper: espera total_ms dividindo em fatias e retorna cedo se night_mode ou ped_request ocorrerem
-   -> Esta função não altera flags; o comportamento de reação ficará nas threads.
-*/
-static void sleep_chunked_check(uint32_t total_ms)
-{
-    const uint32_t CHUNK_MS = 100; // checagem a cada 100ms para permitir interrupção rápida
-    uint32_t elapsed = 0;
-
-    while (elapsed < total_ms) {
-        uint32_t t = MIN(CHUNK_MS, total_ms - elapsed);
-        k_msleep(t);
-        elapsed += t;
-        /* interrompe retorno ao chamador para que ele verifique flags */
-        break; // NOTE: voltamos ao chamador para que este checar flags explicitamente
-    }
-}
-
-/* Versão utilizada nas threads: dorme em fatias e permite checagens externas a cada fatia */
 static bool sleep_with_checks(uint32_t total_ms)
 {
     const uint32_t CHUNK_MS = 100;
@@ -126,66 +101,51 @@ static bool sleep_with_checks(uint32_t total_ms)
         k_msleep(t);
         elapsed += t;
 
-        /* Se o modo noturno for ativado, retornamos true para indicar interrupção */
         if (atomic_get(&night_mode)) {
-            return true; // interrupção por modo noturno
+            return true;
         }
-        /* Se ped_request apareceu, retornamos true para indicar interrupção */
         if (atomic_get(&ped_request)) {
-            return true; // interrupção por pedido pedestre
+            return true;
         }
     }
-    return false; // completou sem interrupções
+    return false;
 }
 
 /* GREEN THREAD */
 void green_thread(void)
 {
     while (1) {
-
         if (atomic_get(&night_mode)) {
             k_msleep(100);
             continue;
         }
 
         k_sem_take(&sem_green, K_FOREVER);
-
-        /* Setar estado atual para GREEN */
         atomic_set(&current_state, 0);
 
         k_mutex_lock(&led_mutex, K_FOREVER);
         leds_off();
         gpio_pin_set_dt(&led_green, 1);
 
-        /* dormir 3000ms em fatias, verificando flags */
         bool interrupted = sleep_with_checks(3000);
 
         if (interrupted) {
-            /* Se entra aqui por modo noturno, apenas desligar e aguardar loop superior */
             if (atomic_get(&night_mode)) {
                 gpio_pin_set_dt(&led_green, 0);
                 k_mutex_unlock(&led_mutex);
                 continue;
             }
 
-            /* Interrompido por pedido pedestre *ENQUANTO EM GREEN* */
             if (atomic_get(&ped_request)) {
-                /* Não consumimos ped_request aqui: queremos que o fluxo faça AMARELO (1s) e
-                   depois RED pedestre (4s). Portanto, somente sinalizamos a transição para YELLOW.
-                */
                 gpio_pin_set_dt(&led_green, 0);
                 k_mutex_unlock(&led_mutex);
-
                 printk("Green interrompido por pedido: irá para YELLOW (1s) então RED pedestre.\n");
-
-                /* indicar que próxima fase é YELLOW */
                 atomic_set(&current_state, 1);
                 k_sem_give(&sem_yellow);
                 continue;
             }
         }
 
-        /* tempo normal completo */
         gpio_pin_set_dt(&led_green, 0);
         k_mutex_unlock(&led_mutex);
 
@@ -193,31 +153,23 @@ void green_thread(void)
     }
 }
 
-/* YELLOW THREAD (modo normal) */
+/* YELLOW THREAD */
 void yellow_thread(void)
 {
     while (1) {
-
         if (atomic_get(&night_mode)) {
             k_msleep(100);
             continue;
         }
 
         k_sem_take(&sem_yellow, K_FOREVER);
-
-        /* Setar estado atual para YELLOW */
         atomic_set(&current_state, 1);
 
         k_mutex_lock(&led_mutex, K_FOREVER);
         leds_off();
-        /* representação: amarelo = ambos LEDs acesos */
         gpio_pin_set_dt(&led_green, 1);
         gpio_pin_set_dt(&led_red, 1);
 
-        /* piscar amarelo no modo normal (aqui amarelo é 1s) = 1000ms
-           Importante: se ped_request ocorrer DURANTE o amarelo, NÃO reiniciamos o amarelo;
-           deixamos terminar e depois vamos para RED pedestre.
-        */
         const uint32_t TOTAL_YELLOW_MS = 1000;
         uint32_t elapsed = 0;
         const uint32_t CHUNK_MS = 100;
@@ -232,21 +184,15 @@ void yellow_thread(void)
                 early_night = true;
                 break;
             }
-            /* Note: não agimos imediatamente se ped_request aparece — apenas registramos que há um pedido
-               e após o amarelo terminar o trataremos.
-            */
         }
 
         if (early_night) {
-            /* se modo noturno ativado, desligar e liberar mutex */
             leds_off();
             k_mutex_unlock(&led_mutex);
             continue;
         }
 
-        /* Após completar o amarelo (ou terminar o tempo restante), verificar se há pedido pedestre pendente */
         if (atomic_get(&ped_request) && !atomic_get(&ped_active) && !atomic_get(&night_mode)) {
-            /* Consumir pedido e marcar atendimento pedestre */
             atomic_set(&ped_request, 0);
             atomic_set(&ped_active, 1);
 
@@ -258,7 +204,6 @@ void yellow_thread(void)
             continue;
         }
 
-        /* Sem pedido pendente: sequência normal -> RED */
         leds_off();
         k_mutex_unlock(&led_mutex);
 
@@ -270,15 +215,12 @@ void yellow_thread(void)
 void red_thread(void)
 {
     while (1) {
-
         if (atomic_get(&night_mode)) {
             k_msleep(100);
             continue;
         }
 
         k_sem_take(&sem_red, K_FOREVER);
-
-        /* Setar estado atual para RED */
         atomic_set(&current_state, 2);
 
         k_mutex_lock(&led_mutex, K_FOREVER);
@@ -286,59 +228,29 @@ void red_thread(void)
         gpio_pin_set_dt(&led_red, 1);
 
         if (atomic_get(&ped_active)) {
-            /* Atendimento de pedestre: permanecer 4s e ignorar novos pedidos nesse intervalo */
             printk("RED (pedestre) aceso por 4s. Novos pedidos ignorados.\n");
-            const uint32_t CHUNK_MS = 100;
             uint32_t elapsed = 0;
+            const uint32_t CHUNK_MS = 100;
             while (elapsed < 4000) {
                 k_msleep(CHUNK_MS);
                 elapsed += CHUNK_MS;
-                /* ignorar ped_request enquanto ped_active == 1 */
             }
-            /* finalizar atendimento pedestre */
             atomic_set(&ped_active, 0);
             printk("RED (pedestre) finalizado. Voltando ao ciclo normal (GREEN).\n");
             leds_off();
             k_mutex_unlock(&led_mutex);
-
-            /* Reiniciar ciclo começando por green */
             k_sem_give(&sem_green);
             continue;
         } else {
-            /* RED normal: 4s (como parte do ciclo) mas pode ser interrompido por pedido pedestre
-               — então dormimos em fatias checando ped_request
-            */
-            bool interrupted = false;
-
-            const uint32_t CHUNK_MS = 100;
             uint32_t elapsed = 0;
+            const uint32_t CHUNK_MS = 100;
             while (elapsed < 4000) {
                 k_msleep(CHUNK_MS);
                 elapsed += CHUNK_MS;
-
-                if (atomic_get(&night_mode)) {
-                    interrupted = true;
-                    break;
-                }
-                if (atomic_get(&ped_request)) {
-                    /* Se ped_request surge durante RED normal, devemos IGNORAR conforme especificação */
-                    /* Portanto NÃO consumimos ped_request aqui; apenas registramos que houve tentativa e
-                       deixamos o ciclo normal completar. */
-                    printk("Pedido de pedestre recebido durante RED normal: ignorado.\n");
-                    /* opcional: clear ped_request para evitar tentativa futura? Não remover — assumir que
-                       request_pedestrian_crossing já teria recusado se estado fosse RED. */
-                }
+                if (atomic_get(&night_mode)) break;
             }
-
             leds_off();
             k_mutex_unlock(&led_mutex);
-
-            if (atomic_get(&night_mode)) {
-                /* Se entramos no modo noturno, o thread noturno cuidará do piscar */
-                continue;
-            }
-
-            /* Segue sequencia normal */
             k_sem_give(&sem_green);
         }
     }
@@ -356,19 +268,16 @@ void night_mode_thread(void)
         k_mutex_lock(&led_mutex, K_FOREVER);
         leds_off();
         gpio_pin_set_dt(&led_green, 1);
-        gpio_pin_set_dt(&led_red, 1); // amarelo
+        gpio_pin_set_dt(&led_red, 1);
         k_msleep(1000);
-
         leds_off();
         k_mutex_unlock(&led_mutex);
-
         k_msleep(1000);
     }
 }
 
 void button_thread(void)
 {
-    /* Configuração do pino PTA1 */
     if (!device_is_ready(button_dev)) {
         printk("Erro: GPIOA não está pronto para o botão\n");
         return;
@@ -376,22 +285,20 @@ void button_thread(void)
 
     gpio_pin_configure(button_dev, BUTTON_PIN, GPIO_INPUT | GPIO_PULL_UP);
 
-    uint8_t last_state = 1; // pull-up → repouso = 1
+    uint8_t last_state = 1;
 
     while (1) {
         uint8_t state = gpio_pin_get(button_dev, BUTTON_PIN);
 
-        /* Detecta borda de descida: 1 → 0 = botão pressionado */
         if (last_state == 1 && state == 0) {
             printk("Botão de pedestre pressionado\n");
             request_pedestrian_crossing();
         }
 
         last_state = state;
-        k_msleep(50); // polling a cada 50ms
+        k_msleep(50);
     }
 }
-
 
 /* Cria threads */
 K_THREAD_DEFINE(green_tid,  512, green_thread,      NULL, NULL, NULL, 1, 0, 0);
@@ -399,7 +306,6 @@ K_THREAD_DEFINE(yellow_tid, 512, yellow_thread,     NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(red_tid,    512, red_thread,        NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(night_tid,  512, night_mode_thread, NULL, NULL, NULL, 1, 0, 0);
 K_THREAD_DEFINE(button_tid, 512, button_thread, NULL, NULL, NULL, 2, 0, 0);
-
 
 void main(void)
 {
@@ -418,12 +324,27 @@ void main(void)
         }
     }
 
+    /* NOVO: configuração de PTA2 como entrada */
+    if (!device_is_ready(input_dev)) {
+        printk("Erro: GPIOA não está pronto para PTA2\n");
+        return;
+    }
+
+    ret = gpio_pin_configure(input_dev, INPUT_PIN, GPIO_INPUT | GPIO_PULL_UP);
+    if (ret < 0) {
+        printk("Erro %d ao configurar PTA2 como input\n", ret);
+        return;
+    }
+    printk("PTA2 configurado como entrada (pull-up habilitado)\n");
+
     /* Garante que o ciclo inicie por green */
     atomic_set(&current_state, 0);
     k_sem_give(&sem_green);
 
-    /* main fica em loop para não encerrar */
+    /* Exemplo de leitura simples de PTA2 */
     while (1) {
+        int val = gpio_pin_get(input_dev, INPUT_PIN);
+        printk("Leitura PTA2 = %d\n", val);
         k_msleep(1000);
     }
 }
