@@ -1,8 +1,3 @@
-Ótimo — seguindo o **Modelo-V** do link que você enviou, abaixo estão **propostas de testes** organizadas conforme solicitado. Mantive o padrão usado no material: testes de componentes individuais, depois integração e depois requisito especial (modo noturno).
-Cada item está descrito de forma clara, objetiva e mensurável para fácil aplicação em bancada.
-
----
-
 ## ✅ **1. Testes de Código Individual — Semáforo de Pedestres (Mestre)**
 
 ### **Teste P1 – Ciclo básico sem interação do usuário**
@@ -141,7 +136,3 @@ Se quiser, posso complementar com:
 ✅ **casos de teste negativos** (ex.: ruído no pino, bouncing do botão)
 ✅ **testes automatizados com Zephyr ztest**
 ✅ **testes de estresse e robustez (overnight test)**
-
----
-
-Quer que eu transforme esses testes em uma **tabela no padrão do Modelo-V** (com ID, propósito, entradas, execução, resultados esperados e critérios de aceitação)?
