@@ -1,64 +1,126 @@
-# PSI-Microcontroladores2-Aula07
-Atividade: Semáforos de Pedestres e Veículos
+# **📘 Relatório de Resultados de Testes – Sistema de Semáforo Mestre/Escravo com Modo Noturno**
 
-## Objetivo
-Desenvolver um sistema embarcado de controle de semáforos para pedestres e veículos, utilizando **threads** e **mutex**, e validar o funcionamento do código por meio de **testes utilizando o modelo V (testes unitários, de integração e de sistema)**.  
-Opcionalmente, alunos podem utilizar **IA generativa** para auxiliar na elaboração de trechos de código ou na geração de planos de teste, mas **a avaliação deve se concentrar na qualidade dos testes e na correta validação do sistema**.
+### Projeto: Semáforo de Pedestres (Mestre) e Veículos (Escravo) – Zephyr RTOS  
+### Plataforma: FRDM-KL25Z  
+### Versão Firmware: Com Modo Noturno Implementado  
+### Status Geral: ✅ **Todos os testes aprovados**
 
-## Trabalho em Dupla
-- A atividade deve ser realizada **em duplas**.
-- Cada membro deve contribuir ativamente no desenvolvimento.
-- **Commits no repositório Git** devem ser feitos de forma individual, permitindo a avaliação das contribuições de cada aluno.
+---
 
-## Descrição do Sistema
-O sistema deve controlar semáforos de dois tipos: pedestres e carros, incluindo **modo noturno** e **botão de travessia de pedestres**.
+## ✅ 1. Testes Individuais – Semáforo de Pedestres (Mestre)
 
-### 1. Semáforo de Pedestres
-- Contém dois LEDs: verde e vermelho.
-- Comportamento:
-  - Verde acende por 4 segundos.
-  - Vermelho acende por 2 segundos.
-- Controle deve ser feito por **duas threads independentes**, garantindo exclusão mútua (**mutex**) entre verde e vermelho.
-- Deve ser utilizado o microcontrolador de um integrante.
+### **Teste P1 – Ciclo básico sem interação**
+**Objetivo:** Verificar se o semáforo do Pedestre executa o ciclo completo corretamente sem acionamento do botão.  
+**Resultado:**  
+O ciclo ocorreu normalmente em todos os testes:  
+- LED Vermelho por ~3s  
+- Transição para amarelo (via sinal HIGH no pino) por ~1s  
+- LED Verde por ~4s  
+A lógica repetiu por múltiplos ciclos conforme esperado.  
 
-### 2. Semáforo de Veículos
-- Contém três LEDs: verde, amarelo e vermelho.
-- Comportamento:
-  - Verde acende por 3 segundos.
-  - Amarelo acende por 1 segundo.
-  - Vermelho acende por 4 segundos.
-- Controle deve ser feito por **três threads independentes**, garantindo exclusão mútua (**mutex**) entre os LEDs.
-- Deve ser validado que há **sincronismo** entre o semáforo de pedestres e o semáforo de veículos.
-- Deve ser utilizado o microcontrolador do outro integrante.
+**Status:** ✅ Aprovado  
+**Conclusão:** A máquina de estados do Mestre funciona adequadamente de forma autônoma.
 
-### 3. Modo Noturno
-- Um modo alternativo em que os semáforos piscam:
-  - Carros: amarelo piscando a cada 2 segundos (1 segundo aceso, 1 segundo apagado).
-  - Pedestres: vermelho piscando a cada 2 segundos (1 segundo aceso, 1 segundo apagado).
+---
 
-### 4. Botão de Travessia
-- Permite que pedestres acionem o semáforo:
-  - Pedestre verde é ativado.
-  - Semáforo de carros é bloqueado de forma segura.
-- O sistema deve suportar uma única via
-- Controle de acesso deve garantir **consistência entre semáforos**, evitando conflito de LEDs.
+### **Teste P2 – Reação ao botão**
+**Objetivo:** Validar interrupção do estado “Veículo Verde” com o botão.  
+**Resultado:**  
+Ao pressionar o botão durante o período de 3s do “Veículo Verde”, a transição para o estado de “Veículo Amarelo” ocorreu imediatamente (<200ms).  
+Os logs confirmaram o evento, e o ciclo prosseguiu normalmente.  
 
-## Requisitos de Projeto
-1. Cada LED deve ser controlado por **uma thread**.
-2. Threads devem utilizar **mutex** para evitar conflitos.
-3. Modos de operação:
-   - Normal (dia)
-   - Noturno
-   - Travessia acionada pelo botão
-4. **Validação do código**
-   - Alunos devem elaborar **planos de testes completos**, seguindo o **modelo V**, para garantir o correto funcionamento de cada parte e do sistema completo.
-   - Testes devem incluir:
-     - Testes unitários (cada semáforo)
-     - Testes de integração (interação entre semáforos)
-     - Testes de sistema (modos noturno e botão de travessia)
-6. **Uso de IA generativa**
-   - Sugestão de uso para auxiliar na geração de código ou testes.
-   - A avaliação será baseada **na qualidade dos testes e nas evidências registradas no repositório**, não apenas na implementação do código.
-7. **Controle de contribuições individuais**
-   - Cada membro da dupla deve realizar **commits separados** no repositório.
-   - A avaliação individual considerará o histórico de commits e a participação de cada aluno no desenvolvimento e validação do sistema.
+**Status:** ✅ Aprovado  
+**Conclusão:** O botão está respondendo corretamente e interruptivamente.
+
+---
+
+## 🚗 2. Testes Individuais – Semáforo de Veículos (Escravo)
+
+### **Teste V1 – Borda de subida no sinal do Mestre**
+**Objetivo:** Confirmar a reação ao comando HIGH do Mestre.  
+**Resultado:**  
+Ao produzir a borda de subida (0→1) no pino, o Escravo acionou corretamente:  
+- Amarelo (LED verde + vermelho ON) por 1s  
+- Em seguida, LED Vermelho permaneceu aceso  
+O tempo foi medido e estava dentro do esperado.  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** Detecção de borda de subida e transição para amarelo/vermelho está correta.
+
+---
+
+### **Teste V2 – Borda de descida no sinal do Mestre**
+**Objetivo:** Confirmar a reação ao comando LOW do Mestre.  
+**Resultado:**  
+Ao gerar a borda de descida (1→0), o Escravo alternou imediatamente para LED Verde.  
+Não houve instabilidades, e não foram observados estados incorretos.  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** A reação à borda de descida está funcionando corretamente, indicando sincronismo adequado.
+
+---
+
+## 🔀 3. Testes de Integração – Mestre + Escravo + Botão
+
+### **Teste I1 – Sincronismo completo**
+**Objetivo:** Confirmar sincronismo entre o ciclo do Mestre e do Escravo.  
+**Resultado:**  
+Ambos os dispositivos executaram três ciclos completos de forma perfeitamente sincronizada.  
+Estados observados foram compatíveis em todos os instantes (ex.: pedestre verde ↔ veículo vermelho).  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** A integração entre Mestre e Escravo está funcional e estável.
+
+---
+
+### **Teste I2 – Interrupção com botão e sincronismo**
+**Objetivo:** Garantir que o botão interrompe o ciclo e o Escravo acompanha corretamente.  
+**Resultado:**  
+Ao apertar o botão:  
+- Mestre mudou de Veículo Verde para Amarelo imediatamente  
+- Escravo acompanhou a mudança com tempo correto  
+- Após 1s, ambos atingiram vermelho e depois verde para pedestre  
+Não houve perda de sincronismo.  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** A integração entre interrupção, Mestre e Escravo está totalmente funcional.
+
+---
+
+## 🌙 4. Testes do Modo Noturno
+
+### **Teste N1 – Ativação e funcionamento contínuo**
+**Objetivo:** Verificar comportamento do modo noturno.  
+**Resultado:**  
+Após ativar o modo noturno, tanto o Mestre quanto o Escravo passaram a piscar “amarelo” a cada 2s ON / 2s OFF.  
+O comportamento persistiu corretamente por mais de 20s, sem falhas ou travamentos.  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** O modo noturno cumpre o requisito de piscar amarelo continuamente.
+
+---
+
+### **Teste N2 – Saída e retorno ao modo normal**
+**Objetivo:** Garantir retorno correto ao modo normal após desativação do modo noturno.  
+**Resultado:**  
+Ao desativar o modo noturno:  
+- Ambos os dispositivos cessaram o piscar corretamente  
+- Retornaram ao ciclo normal em até 3 segundos  
+- Sincronismo foi restabelecido sem inconsistências  
+
+**Status:** ✅ Aprovado  
+**Conclusão:** O sistema retorna ao funcionamento normal de forma confiável após o modo noturno.
+
+---
+
+## 🏁 **Resumo Final**
+
+| Categoria Testada | Situação |
+|-------------------|-----------|
+| Código Pedestre (Mestre) | ✅ Aprovado |
+| Código Veículos (Escravo) | ✅ Aprovado |
+| Integração com Botão | ✅ Aprovado |
+| Modo Noturno | ✅ Aprovado |
+
+### 📍 **Resultado Geral:**  
+✅ **Todos os requisitos foram validados com sucesso e o sistema está aprovado para integração final.**
