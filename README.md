@@ -128,11 +128,3 @@
 * LEDs apagam momentaneamente (clear) e o sistema retorna ao início do ciclo.
 * Mestre e Escravo reagem novamente ao botão e ao sinal mestre.
   **Critério de Sucesso:** Retorno ao modo normal em até 3s, sem estados inconsistentes.
-
----
-
-Se quiser, posso complementar com:
-
-✅ **casos de teste negativos** (ex.: ruído no pino, bouncing do botão)
-✅ **testes automatizados com Zephyr ztest**
-✅ **testes de estresse e robustez (overnight test)**
